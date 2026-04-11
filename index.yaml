@@ -1,0 +1,25 @@
+apiVersion: v1
+entries:
+  osuite-k8s:
+  - apiVersion: v2
+    appVersion: 1.0.0
+    created: "2026-04-11T08:17:47.243681508Z"
+    dependencies:
+    - condition: kube-state-metrics.enabled
+      name: kube-state-metrics
+      repository: https://prometheus-community.github.io/helm-charts
+      version: 7.2.0
+    - alias: opentelemetry
+      condition: opentelemetry.enabled
+      name: opentelemetry-operator
+      repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+      version: 0.99.0
+    description: Kubernetes cluster monitoring - ships metrics, logs, and k8s objects
+      to Osuite via OpenTelemetry.
+    digest: 51daeff41237fba529fe6d0b7d709b7a8bba95508a9d16b864c4d33c5dd253c7
+    name: osuite-k8s
+    type: application
+    urls:
+    - https://github.com/osuite-io/integrations/releases/download/osuite-k8s-0.1.0/osuite-k8s-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-04-11T08:17:47.243689613Z"
