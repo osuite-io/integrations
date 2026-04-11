@@ -1,0 +1,236 @@
+{{- if or .Values.otel_daemon.enableHostMetrics .Values.otel_daemon.containerlogs.enabled }}
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel-daemon
+  namespace: {{ .Release.Namespace }}
+spec:
+  mode: daemonset
+  tolerations:
+    - operator: Exists
+      effect: NoSchedule
+  image: otel/opentelemetry-collector-contrib:0.148.0
+  serviceAccount: otel-collector-sa
+  resources:
+    {{- toYaml .Values.otel_daemon.resources | nindent 4 }}
+  env:
+    - name: KUBE_NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+  {{- $hasLogs := .Values.otel_daemon.containerlogs.enabled }}
+  {{- $hasMetrics := .Values.otel_daemon.enableHostMetrics }}
+  volumes:
+    {{- if $hasMetrics }}
+    - name: hostfs
+      hostPath:
+        path: /
+    {{- end }}
+    {{- if $hasLogs }}
+    - name: varlogpods
+      hostPath:
+        path: /var/log/pods
+    {{- end }}
+  volumeMounts:
+    {{- if $hasMetrics }}
+    - name: hostfs
+      mountPath: /hostfs
+      readOnly: true
+    {{- end }}
+    {{- if $hasLogs }}
+    - name: varlogpods
+      mountPath: /var/log/pods
+      readOnly: true
+    {{- end }}
+  config:
+    receivers:
+      {{- if $hasLogs }}
+      filelog:
+        include:
+          - /var/log/pods/*/*/*.log
+        # Exclude the collector's own logs to avoid infinite loop
+        exclude:
+          - /var/log/pods/{{ .Release.Namespace }}_otel-daemon*/*/*.log
+        start_at: end
+        include_file_path: true
+        include_file_name: false
+        operators:
+          # Parse the CRI log format: timestamp stream flags message
+          - type: container
+            id: container-parser
+      {{- end }}
+      {{- if $hasMetrics }}
+      hostmetrics:
+        collection_interval: 30s
+        root_path: /hostfs
+        scrapers:
+          cpu: {}
+          memory: {}
+          disk:
+            exclude:
+              devices: ["^loop\\d+$", "^ram\\d+$"]
+              match_type: regexp
+          filesystem:
+            exclude_fs_types:
+              fs_types: [autofs, binfmt_misc, bpf, cgroup, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs, iso9660, mqueue, nsfs, overlay, proc, procfs, pstore, rpc_pipefs, securityfs, selinuxfs, squashfs, sysfs, tracefs, tmpfs]
+              match_type: strict
+            exclude_mount_points:
+              mount_points: ["^/dev/.*", "^/proc/.*", "^/sys/.*", "^/run/containerd/.*", "^/var/lib/docker/.*", "^/var/lib/containerd/.*", "^/snap/.*"]
+              match_type: regexp
+          network:
+            exclude:
+              interfaces: ["^veth.*", "^docker.*", "^br-.*", "^cali.*", "^flannel.*", "^cni.*", "^lo$"]
+              match_type: regexp
+          load: {}
+      {{- end }}
+
+    processors:
+      batch:
+        send_batch_max_size: 3000
+        send_batch_size: 1000
+        timeout: 5s
+
+      {{- if $hasLogs }}
+      {{- $nsList := .Values.otel_daemon.containerlogs.namespaces }}
+
+      k8sattributes:
+        auth_type: serviceAccount
+        filter:
+          node_from_env_var: KUBE_NODE_NAME
+        extract:
+          metadata:
+            - k8s.deployment.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.node.name
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.name
+              - from: resource_attribute
+                name: k8s.namespace.name
+
+      transform/service-name:
+        error_mode: ignore
+        log_statements:
+          - context: resource
+            statements:
+              - set(attributes["service.name"], attributes["k8s.deployment.name"]) where attributes["k8s.deployment.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.statefulset.name"]) where attributes["k8s.statefulset.name"] != nil and attributes["service.name"] == nil
+              - set(attributes["service.name"], attributes["k8s.daemonset.name"]) where attributes["k8s.daemonset.name"] != nil and attributes["service.name"] == nil
+              - set(attributes["service.name"], attributes["k8s.pod.name"]) where attributes["service.name"] == nil
+
+      transform/severity:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - set(severity_text, "ERROR") where IsMatch(body, "(?i)\\b(ERROR|FATAL|CRITICAL)\\b")
+              - set(severity_text, "WARN")  where IsMatch(body, "(?i)\\b(WARN|WARNING)\\b") and severity_text == ""
+              - set(severity_text, "INFO")  where IsMatch(body, "(?i)\\bINFO\\b") and severity_text == ""
+              - set(severity_text, "INFO")  where severity_text == "" and attributes["log.iostream"] == "stdout"
+              - set(severity_text, "ERROR") where severity_text == "" and attributes["log.iostream"] == "stderr"
+
+      {{- $nsList := .Values.otel_daemon.containerlogs.namespaces }}
+      {{- if $nsList }}
+      filter/logs:
+        error_mode: ignore
+        logs:
+          log_record:
+            - |
+              not (
+                {{- range $i, $entry := $nsList }}
+                {{- if $i }} or{{ end }}
+                (resource.attributes["k8s.namespace.name"] == "{{ $entry.name }}"
+                {{- if $entry.include }} and ({{ range $j, $p := $entry.include }}{{ if $j }} or {{ end }}IsMatch(resource.attributes["k8s.pod.name"], "{{ $p }}"){{ end }}){{ end }}
+                {{- if $entry.exclude }} and not ({{ range $j, $p := $entry.exclude }}{{ if $j }} or {{ end }}IsMatch(resource.attributes["k8s.pod.name"], "{{ $p }}"){{ end }}){{ end }}
+                {{- if $entry.levels }} and ({{ range $j, $l := $entry.levels }}{{ if $j }} or {{ end }}severity_text == "{{ $l }}"{{ end }}){{ end }}
+                )
+                {{- end }}
+              )
+      {{- end }}
+      {{- end }}
+
+      {{- if and $hasLogs .Values.environment }}
+      resource/environment:
+        attributes:
+          - key: service.environment
+            value: {{ .Values.environment | quote }}
+            action: upsert
+      {{- end }}
+
+      {{- if $hasMetrics }}
+      resource/cluster:
+        attributes:
+          - key: cluster
+            value: {{ .Values.cluster | quote }}
+            action: upsert
+
+      transform/hostmetrics-cleanup:
+        error_mode: ignore
+        metric_statements:
+          - context: resource
+            statements:
+              # Remove high-cardinality container name/id fields
+              - delete_key(attributes, "name")
+              - delete_key(attributes, "id")
+              # Remove container-scope labels irrelevant to host metrics
+              - delete_key(attributes, "container")
+              - delete_key(attributes, "image")
+              - delete_key(attributes, "job")
+              # Remove duplicates of kubernetes_io_hostname
+              - delete_key(attributes, "instance")
+              - delete_key(attributes, "node")
+              # Remove deprecated beta labels (superseded by non-beta equivalents)
+              - delete_key(attributes, "beta_kubernetes_io_arch")
+              - delete_key(attributes, "beta_kubernetes_io_os")
+              - delete_key(attributes, "failure_domain_beta_kubernetes_io_region")
+              - delete_key(attributes, "failure_domain_beta_kubernetes_io_zone")
+              # Remove low-value EKS/AWS node labels
+              - delete_key(attributes, "eks_amazonaws_com_capacityType")
+              - delete_key(attributes, "eks_amazonaws_com_nodegroup")
+              - delete_key(attributes, "eks_amazonaws_com_nodegroup_image")
+              - delete_key(attributes, "eks_amazonaws_com_sourceLaunchTemplateId")
+              - delete_key(attributes, "eks_amazonaws_com_sourceLaunchTemplateVersion")
+              - delete_key(attributes, "k8s_io_cloud_provider_aws")
+              - delete_key(attributes, "node_kubernetes_io_exclude_from_external_load_balancers")
+              - delete_key(attributes, "topology_ebs_csi_aws_com_zone")
+              - delete_key(attributes, "topology_k8s_aws_zone_id")
+      {{- end }}
+
+    exporters:
+      otlp/osuite:
+        endpoint: {{ .Values.common.osuite_ingest_endpoint }}
+        tls:
+          insecure: false
+        headers:
+          x-osuite-ingest-token: {{ .Values.common.osuite_ingest_key }}
+
+    service:
+      pipelines:
+        {{- if $hasLogs }}
+        {{- $logProcessors := list "k8sattributes" "transform/service-name" "transform/severity" }}
+        {{- if .Values.otel_daemon.containerlogs.namespaces }}
+        {{- $logProcessors = append $logProcessors "filter/logs" }}
+        {{- end }}
+        {{- if .Values.environment }}
+        {{- $logProcessors = append $logProcessors "resource/environment" }}
+        {{- end }}
+        {{- $logProcessors = append $logProcessors "batch" }}
+        logs/containers:
+          receivers: [filelog]
+          processors: {{ $logProcessors | toJson }}
+          exporters: [otlp/osuite]
+        {{- end }}
+        {{- if $hasMetrics }}
+        metrics/host:
+          receivers: [hostmetrics]
+          processors: [resource/cluster, transform/hostmetrics-cleanup, batch]
+          exporters: [otlp/osuite]
+        {{- end }}
+{{- end }}

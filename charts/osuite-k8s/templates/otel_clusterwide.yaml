@@ -1,0 +1,185 @@
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel-clusterwide
+  namespace: {{ .Release.Namespace }}
+spec:
+  mode: deployment
+  # Singleton. Don't change.
+  replicas: 1
+  tolerations:
+    - operator: Exists
+      effect: NoSchedule
+  image: otel/opentelemetry-collector-contrib:0.148.0
+  serviceAccount: otel-collector-sa
+  config:
+    receivers:
+      prometheus/ksm:
+        config:
+          scrape_configs:
+            - job_name: 'kube-state-metrics'
+              scrape_interval: 60s
+              kubernetes_sd_configs:
+                - role: endpointslice
+                  namespaces:
+                    names:
+                      - {{ .Release.Namespace }}
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_service_name]
+                  action: keep
+                  regex: {{ .Release.Namespace }}-kube-state-metrics
+                - source_labels: [__meta_kubernetes_endpointslice_port_name]
+                  action: keep
+                  regex: http
+                - action: labelmap
+                  regex: __meta_kubernetes_service_label_(.+)
+                - source_labels: [__meta_kubernetes_namespace]
+                  target_label: kubernetes_namespace
+                - source_labels: [__meta_kubernetes_service_name]
+                  target_label: kubernetes_service
+              metric_relabel_configs:
+                - target_label: cluster
+                  replacement: {{ .Values.cluster}}
+      prometheus/kubelet:
+        config:
+          scrape_configs:
+            - job_name: 'kubelet'
+              scrape_interval: 60s
+              scheme: https
+              tls_config:
+                ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                insecure_skip_verify: true
+              authorization:
+                type: Bearer
+                credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+              kubernetes_sd_configs:
+                - role: node
+              relabel_configs:
+                - action: labelmap
+                  regex: __meta_kubernetes_node_label_(.+)
+                - source_labels: [__meta_kubernetes_node_name]
+                  target_label: node
+                - target_label: __address__
+                  replacement: kubernetes.default.svc:443
+                - source_labels: [__meta_kubernetes_node_name]
+                  regex: (.+)
+                  target_label: __metrics_path__
+                  replacement: /api/v1/nodes/$${1}/proxy/metrics
+              metric_relabel_configs:
+                - target_label: cluster
+                  replacement: {{ .Values.cluster}}
+                # Generic nodepool label — try cloud-specific labels in order
+                - source_labels: [eks_amazonaws_com_nodegroup]
+                  regex: (.+)
+                  target_label: nodepool
+                  replacement: $1
+                - source_labels: [karpenter_sh_nodepool]
+                  regex: (.+)
+                  target_label: nodepool
+                  replacement: $1
+                - source_labels: [cloud_google_com_gke_nodepool]
+                  regex: (.+)
+                  target_label: nodepool
+                  replacement: $1
+                - action: labeldrop
+                  regex: uid|instance|beta_kubernetes_io_.*|failure_domain_beta_kubernetes_io_.*|eks_amazonaws_com_.*|k8s_io_cloud_provider_aws|node_kubernetes_io_exclude_from_external_load_balancers|topology_ebs_csi_aws_com_zone|topology_k8s_aws_zone_id
+            - job_name: 'cadvisor'
+              scrape_interval: 60s
+              scheme: https
+              tls_config:
+                ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                insecure_skip_verify: true
+              authorization:
+                type: Bearer
+                credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+              kubernetes_sd_configs:
+                - role: node
+              relabel_configs:
+                - action: labelmap
+                  regex: __meta_kubernetes_node_label_(.+)
+                - source_labels: [__meta_kubernetes_node_name]
+                  target_label: node
+                - target_label: __address__
+                  replacement: kubernetes.default.svc:443
+                - source_labels: [__meta_kubernetes_node_name]
+                  regex: (.+)
+                  target_label: __metrics_path__
+                  replacement: /api/v1/nodes/$${1}/proxy/metrics/cadvisor
+              metric_relabel_configs:
+                - target_label: cluster
+                  replacement: {{ .Values.cluster}}
+                - action: labeldrop
+                  regex: id|uid|name|instance|beta_kubernetes_io_.*|failure_domain_beta_kubernetes_io_.*|eks_amazonaws_com_.*|k8s_io_cloud_provider_aws|node_kubernetes_io_exclude_from_external_load_balancers|topology_ebs_csi_aws_com_zone|topology_k8s_aws_zone_id
+      k8sobjects:
+        auth_type: serviceAccount
+        error_mode: ignore
+        objects:
+          - name: events
+            group: events.k8s.io
+            mode: watch
+          - name: pods
+            mode: pull
+            interval: 10m
+          - name: nodes
+            mode: pull
+            interval: 10m
+          - name: namespaces
+            mode: pull
+            interval: 10m
+          - name: deployments
+            group: apps
+            mode: pull
+            interval: 10m
+          - name: replicasets
+            group: apps
+            mode: pull
+            interval: 10m
+          - name: statefulsets
+            group: apps
+            mode: pull
+            interval: 10m
+          - name: daemonsets
+            group: apps
+            mode: pull
+            interval: 10m
+          - name: jobs
+            group: batch
+            mode: pull
+            interval: 10m
+          - name: cronjobs
+            group: batch
+            mode: pull
+            interval: 10m
+    processors:
+      batch:
+        send_batch_max_size: 3000
+        send_batch_size: 1000
+        timeout: 5s
+
+      transform/k8sobjects:
+        log_statements:
+          - context: log
+            statements:
+              - set(time, observed_time)
+              - set(resource.attributes["cluster"], "{{ .Values.cluster }}")
+              - set(resource.attributes["environment"], "{{ .Values.environment }}")
+              - set(attributes["parsedEvent"], body["object"])
+              - set(body, "")
+    exporters:
+      otlp/osuite:
+        endpoint: {{ .Values.common.osuite_ingest_endpoint }}
+        tls:
+          insecure: false
+        headers:
+          x-osuite-ingest-token: {{ .Values.common.osuite_ingest_key }}
+
+    service:
+      pipelines:
+        metrics:
+          receivers: [prometheus/kubelet, prometheus/ksm]
+          processors: [batch]
+          exporters: [otlp/osuite]
+        logs:
+          receivers: [k8sobjects]
+          processors: [transform/k8sobjects, batch]
+          exporters: [otlp/osuite]

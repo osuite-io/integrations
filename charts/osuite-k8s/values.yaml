@@ -1,0 +1,34 @@
+common:
+  osuite_ingest_key: "change_me"
+  osuite_ingest_endpoint: "ingest.us.osuite.io:443"
+
+cluster: ""
+environment: ""
+
+otel_daemon:
+  enableHostMetrics: false
+  containerlogs:
+    enabled: false
+    # namespaces: []  # empty = send from all namespaces, pods, and levels
+    # Each entry: { name: "ns", include: [".*foo.*"], exclude: [".*bar.*"], levels: ["ERROR","WARN"] }
+    # include omitted  = all pods in that namespace
+    # exclude omitted  = nothing excluded
+    # both present     = must match include AND not match exclude (exclude wins)
+    # levels omitted   = all severity levels
+    namespaces: []
+  resources:
+    limits:
+      cpu: 256m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 50Mi
+
+opentelemetry:
+  enabled: true
+
+kube-state-metrics:
+  enabled: true
+  tolerations:
+    - operator: Exists
+      effect: NoSchedule
