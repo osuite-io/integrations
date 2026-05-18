@@ -2,7 +2,7 @@ apiVersion: v2
 name: osuite-k8s
 description: Kubernetes cluster monitoring - ships metrics, logs, and k8s objects to Osuite via OpenTelemetry.
 type: application
-version: 0.1.0
+version: 0.1.1
 appVersion: 1.0.0
 
 dependencies:
