@@ -1,7 +1,7 @@
 common:
   osuite_ingest_key: "change_me"
   osuite_ingest_endpoint: "ingest.us.osuite.io:443"
-  tls: true
+  insecure: false 
 
 cluster: ""
 environment: ""

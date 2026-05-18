@@ -207,7 +207,7 @@ spec:
       otlp/osuite:
         endpoint: {{ .Values.common.osuite_ingest_endpoint }}
         tls:
-          insecure: {{ .Values.common.tls }}
+          insecure: {{ .Values.common.insecure }}
         headers:
           x-osuite-ingest-token: {{ .Values.common.osuite_ingest_key }}
 
