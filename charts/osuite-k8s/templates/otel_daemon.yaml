@@ -1,48 +1,13 @@
 {{- if or .Values.otel_daemon.enableHostMetrics .Values.otel_daemon.containerlogs.enabled }}
-apiVersion: opentelemetry.io/v1beta1
-kind: OpenTelemetryCollector
+{{- $hasLogs := .Values.otel_daemon.containerlogs.enabled }}
+{{- $hasMetrics := .Values.otel_daemon.enableHostMetrics }}
+apiVersion: v1
+kind: ConfigMap
 metadata:
   name: otel-daemon
   namespace: {{ .Release.Namespace }}
-spec:
-  mode: daemonset
-  tolerations:
-    - operator: Exists
-      effect: NoSchedule
-  image: otel/opentelemetry-collector-contrib:0.148.0
-  serviceAccount: otel-collector-sa
-  resources:
-    {{- toYaml .Values.otel_daemon.resources | nindent 4 }}
-  env:
-    - name: KUBE_NODE_NAME
-      valueFrom:
-        fieldRef:
-          fieldPath: spec.nodeName
-  {{- $hasLogs := .Values.otel_daemon.containerlogs.enabled }}
-  {{- $hasMetrics := .Values.otel_daemon.enableHostMetrics }}
-  volumes:
-    {{- if $hasMetrics }}
-    - name: hostfs
-      hostPath:
-        path: /
-    {{- end }}
-    {{- if $hasLogs }}
-    - name: varlogpods
-      hostPath:
-        path: /var/log/pods
-    {{- end }}
-  volumeMounts:
-    {{- if $hasMetrics }}
-    - name: hostfs
-      mountPath: /hostfs
-      readOnly: true
-    {{- end }}
-    {{- if $hasLogs }}
-    - name: varlogpods
-      mountPath: /var/log/pods
-      readOnly: true
-    {{- end }}
-  config:
+data:
+  config.yaml: |
     receivers:
       {{- if $hasLogs }}
       filelog:
@@ -102,6 +67,8 @@ spec:
             - k8s.deployment.name
             - k8s.statefulset.name
             - k8s.daemonset.name
+            - k8s.job.name
+            - k8s.cronjob.name
             - k8s.namespace.name
             - k8s.pod.name
             - k8s.node.name
@@ -164,12 +131,20 @@ spec:
             action: upsert
       {{- end }}
 
-      {{- if $hasMetrics }}
       resource/cluster:
         attributes:
           - key: cluster
             value: {{ .Values.cluster | quote }}
             action: upsert
+
+      {{- if $hasMetrics }}
+      transform/hostmetrics-labels:
+        error_mode: ignore
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(attributes["cluster"], {{ .Values.cluster | quote }})
+              - set(attributes["node"], "${env:KUBE_NODE_NAME}")
 
       transform/hostmetrics-cleanup:
         error_mode: ignore
@@ -214,7 +189,7 @@ spec:
     service:
       pipelines:
         {{- if $hasLogs }}
-        {{- $logProcessors := list "k8sattributes" "transform/service-name" "transform/severity" }}
+        {{- $logProcessors := list "k8sattributes" "transform/service-name" "transform/severity" "resource/cluster" }}
         {{- if .Values.otel_daemon.containerlogs.namespaces }}
         {{- $logProcessors = append $logProcessors "filter/logs" }}
         {{- end }}
@@ -230,7 +205,7 @@ spec:
         {{- if $hasMetrics }}
         metrics/host:
           receivers: [hostmetrics]
-          processors: [resource/cluster, transform/hostmetrics-cleanup, batch]
+          processors: [resource/cluster, transform/hostmetrics-cleanup, transform/hostmetrics-labels, batch]
           exporters: [otlp/osuite]
         {{- end }}
 {{- end }}

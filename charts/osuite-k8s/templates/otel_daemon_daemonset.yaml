@@ -1,0 +1,64 @@
+{{- if or .Values.otel_daemon.enableHostMetrics .Values.otel_daemon.containerlogs.enabled }}
+{{- $hasLogs := .Values.otel_daemon.containerlogs.enabled }}
+{{- $hasMetrics := .Values.otel_daemon.enableHostMetrics }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-daemon
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-daemon
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-daemon
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/otel_daemon.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: otel-collector-sa
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.148.0
+          args: ["--config=/etc/otel/config.yaml"]
+          resources:
+            {{- toYaml .Values.otel_daemon.resources | nindent 12 }}
+          env:
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+            {{- if $hasMetrics }}
+            - name: hostfs
+              mountPath: /hostfs
+              readOnly: true
+            {{- end }}
+            {{- if $hasLogs }}
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: otel-daemon
+        {{- if $hasMetrics }}
+        - name: hostfs
+          hostPath:
+            path: /
+        {{- end }}
+        {{- if $hasLogs }}
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+        {{- end }}
+{{- end }}

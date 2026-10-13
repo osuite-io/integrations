@@ -25,9 +25,6 @@ otel_daemon:
       cpu: 50m
       memory: 50Mi
 
-opentelemetry:
-  enabled: true
-
 kube-state-metrics:
   enabled: true
   tolerations:

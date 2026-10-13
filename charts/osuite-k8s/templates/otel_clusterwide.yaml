@@ -1,18 +1,10 @@
-apiVersion: opentelemetry.io/v1beta1
-kind: OpenTelemetryCollector
+apiVersion: v1
+kind: ConfigMap
 metadata:
   name: otel-clusterwide
   namespace: {{ .Release.Namespace }}
-spec:
-  mode: deployment
-  # Singleton. Don't change.
-  replicas: 1
-  tolerations:
-    - operator: Exists
-      effect: NoSchedule
-  image: otel/opentelemetry-collector-contrib:0.148.0
-  serviceAccount: otel-collector-sa
-  config:
+data:
+  config.yaml: |
     receivers:
       prometheus/ksm:
         config:
@@ -25,9 +17,9 @@ spec:
                     names:
                       - {{ .Release.Namespace }}
               relabel_configs:
-                - source_labels: [__meta_kubernetes_service_name]
+                - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
                   action: keep
-                  regex: {{ .Release.Namespace }}-kube-state-metrics
+                  regex: kube-state-metrics
                 - source_labels: [__meta_kubernetes_endpointslice_port_name]
                   action: keep
                   regex: http
@@ -117,39 +109,7 @@ spec:
           - name: events
             group: events.k8s.io
             mode: watch
-          - name: pods
-            mode: pull
-            interval: 10m
-          - name: nodes
-            mode: pull
-            interval: 10m
-          - name: namespaces
-            mode: pull
-            interval: 10m
-          - name: deployments
-            group: apps
-            mode: pull
-            interval: 10m
-          - name: replicasets
-            group: apps
-            mode: pull
-            interval: 10m
-          - name: statefulsets
-            group: apps
-            mode: pull
-            interval: 10m
-          - name: daemonsets
-            group: apps
-            mode: pull
-            interval: 10m
-          - name: jobs
-            group: batch
-            mode: pull
-            interval: 10m
-          - name: cronjobs
-            group: batch
-            mode: pull
-            interval: 10m
+            exclude_watch_type: [DELETED]
     processors:
       batch:
         send_batch_max_size: 3000
@@ -164,6 +124,7 @@ spec:
               - set(resource.attributes["cluster"], "{{ .Values.cluster }}")
               - set(resource.attributes["environment"], "{{ .Values.environment }}")
               - set(attributes["parsedEvent"], body["object"])
+              - delete_key(attributes["parsedEvent"]["metadata"], "managedFields") where attributes["parsedEvent"] != nil
               - set(body, "")
     exporters:
       otlp/osuite:
